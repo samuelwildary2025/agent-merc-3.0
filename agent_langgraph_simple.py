@@ -20,7 +20,7 @@ from config.settings import settings
 from config.logger import setup_logger
 from tools.http_tools import estoque, pedidos, alterar, ean_lookup, estoque_preco
 # Redis tools removidos - apenas buffer de mensagens mantido
-from tools.time_tool import get_current_time
+from tools.time_tool import get_current_time, search_message_history
 from memory.limited_postgres_memory import LimitedPostgresChatMessageHistory
 
 logger = setup_logger(__name__)
@@ -71,6 +71,27 @@ def alterar_tool(telefone: str, json_body: str) -> str:
 
 
 
+
+
+@tool
+def search_history_tool(telefone: str, keyword: str = None) -> str:
+    """
+    Busca mensagens anteriores do cliente com horários.
+    
+    Use esta ferramenta quando o cliente perguntar sobre:
+    - "Que horas eu falei sobre [produto]?"
+    - "Quando foi que eu pedi [item]?"
+    - "A que horas começamos nossa conversa?"
+    - "Que horas eu mencionei [algo]?"
+    
+    Args:
+        telefone: Número do cliente (formato: 5511999998888)
+        keyword: Palavra-chave para buscar (opcional)
+    
+    Returns:
+        String com mensagens encontradas e seus horários
+    """
+    return search_message_history(telefone, keyword)
 
 
 @tool
@@ -140,6 +161,7 @@ TOOLS = [
     pedidos_tool,
     alterar_tool,
     time_tool,
+    search_history_tool,
     ean_tool,
     ean_tool_alias,
     estoque_preco_tool,
@@ -152,6 +174,7 @@ ACTIVE_TOOLS = [
     estoque_preco_alias,
     estoque_tool,
     time_tool,
+    search_history_tool,
     pedidos_tool,  # <--- ADICIONADO AQUI (Correção Crítica)
 ]
 
