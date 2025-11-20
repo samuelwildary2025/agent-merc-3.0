@@ -31,7 +31,7 @@ logger = setup_logger(__name__)
 app = FastAPI(
     title="Agente de Supermercado",
     description="API para atendimento automatizado via WhatsApp",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 
@@ -68,15 +68,27 @@ class PresenceRequest(BaseModel):
 # Funções Auxiliares
 # ============================================
 
+def get_api_base_url() -> str:
+    """
+    Retorna a URL base da API, priorizando UAZ_API_URL.
+    Evita conflitos com outras variáveis de ambiente.
+    """
+    # Prioridade: UAZ_API_URL > WHATSAPP_API_URL > String vazia
+    url = (settings.uaz_api_url or settings.whatsapp_api_url or "").strip().rstrip("/")
+    return url
+
 def transcribe_audio_uaz(message_id: str) -> Optional[str]:
     """
-    Solicita a transcrição de áudio para a API da UAZ/WhatsApp.
-    Usa o endpoint /message/download com transcribe=true.
+    Solicita a transcrição de áudio para a API da UAZ.
     """
     if not message_id:
         return None
 
-    base = (settings.whatsapp_api_url or "").rstrip("/")
+    base = get_api_base_url()
+    if not base:
+        logger.error("❌ Nenhuma URL de API configurada (UAZ_API_URL ou WHATSAPP_API_URL).")
+        return None
+
     # Montar URL do endpoint de download
     try:
         from urllib.parse import urlparse
@@ -91,20 +103,19 @@ def transcribe_audio_uaz(message_id: str) -> Optional[str]:
         "token": (settings.whatsapp_token or "").strip()
     }
     
-    # Payload conforme documentação
+    # Payload conforme documentação UAZ
     payload = {
         "id": message_id,
         "transcribe": True,
         "return_base64": False,
         "return_link": False,
-        # Passamos a chave da OpenAI do nosso .env para garantir que funcione
         "openai_apikey": settings.openai_api_key
     }
     
-    logger.info(f"🎧 Solicitando transcrição de áudio: {message_id}")
+    logger.info(f"🎧 Solicitando transcrição na UAZ: {message_id}")
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20) # Timeout maior pois transcrição demora
+        response = requests.post(url, headers=headers, json=payload, timeout=25)
         
         if response.status_code == 200:
             data = response.json()
@@ -125,36 +136,27 @@ def transcribe_audio_uaz(message_id: str) -> Optional[str]:
 
 def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normaliza payloads de diferentes provedores (UAZ/Cloud API) para um formato comum.
-    Retorna dict com: telefone, mensagem_texto, message_type, message_id, from_me (bool).
+    Normaliza payloads de diferentes provedores para um formato comum.
     """
-    # 3) Fallback robusto para formato UAZ com campos de topo (message/chat)
-    # (Mantive a lógica principal do UAZ que é a que você usa)
     import re
 
     def _sanitize_phone(raw: Any) -> Optional[str]:
-        if raw is None:
-            return None
+        if raw is None: return None
         s = str(raw)
-        if "@" in s:
-            s = s.split("@")[0]
-        if ":" in s:
-            parts = s.split(":")
-            s = parts[-1]
-        digits = re.sub(r"\D", "", s)
-        return digits or None
+        if "@" in s: s = s.split("@")[0]
+        if ":" in s: s = s.split(":")[-1]
+        return re.sub(r"\D", "", s) or None
 
     chat = payload.get("chat") or {}
     message_any = payload.get("message") or {}
     
-    # Se payload principal for lista (webhook legado), tenta pegar o primeiro
+    # Tratamento para webhooks legados que enviam lista
     if isinstance(payload.get("messages"), list):
         try:
             m0 = payload["messages"][0]
             message_any = m0
             chat = {"wa_id": m0.get("sender") or m0.get("chatid")}
-        except:
-            pass
+        except: pass
 
     mensagem_texto = payload.get("text")
     message_type = payload.get("messageType") or "text"
@@ -166,7 +168,6 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
         message_id = message_any.get("messageid") or message_any.get("id") or message_id
         from_me = bool(message_any.get("fromMe") or message_any.get("wasSentByApi") or False)
         
-        # Extração de texto
         content = message_any.get("content")
         if isinstance(content, str) and not mensagem_texto:
             mensagem_texto = content
@@ -198,11 +199,12 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
             break
 
     # Ajuste de tipos
-    if message_type in (None, "", "textMessage", "conversation", "extendedTextMessage"):
+    msg_type_lower = str(message_type).lower()
+    if msg_type_lower in ("textmessage", "conversation", "extendedtextmessage"):
         message_type = "text"
-    elif "audio" in str(message_type).lower():
+    elif "audio" in msg_type_lower:
         message_type = "audio"
-    elif "image" in str(message_type).lower():
+    elif "image" in msg_type_lower:
         message_type = "image"
 
     # Lógica de Áudio / Imagem
@@ -216,12 +218,11 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
         
         # Se for áudio, tenta transcrever se não tiver texto
         elif message_type == "audio" and not mensagem_texto:
-            # Tenta transcrever aqui se o ID estiver disponível
             if message_id:
                 transcricao = transcribe_audio_uaz(message_id)
                 if transcricao:
                     mensagem_texto = transcricao
-                    # Adicionar prefixo para o agente saber que veio de áudio
+                    # Prefixo para o agente identificar contexto
                     mensagem_texto = f"[Áudio]: {mensagem_texto}"
                 else:
                     mensagem_texto = "[Mensagem de áudio recebida, mas não consegui ouvir]"
@@ -240,10 +241,15 @@ def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
     """
     Envia mensagem de resposta para o WhatsApp via API UAZ
     """
-    base = (settings.whatsapp_api_url or "").rstrip("/")
+    base = get_api_base_url()
+    if not base:
+        logger.error("❌ Nenhuma URL de API configurada para envio.")
+        return False
+
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
+        # Se for só o domínio, adiciona o path padrão
         if not parsed.path or parsed.path == "/":
             url = f"{base}/message/send"
         else:
@@ -257,6 +263,7 @@ def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
         "token": (settings.whatsapp_token or "").strip(),
     }
     
+    # Divisão de mensagens longas
     max_length = 4000
     mensagens = []
     
@@ -280,7 +287,7 @@ def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
             # Payload padrão UAZ
             payload = {"number": numero_sanitizado, "text": msg, "openTicket": "1"}
             
-            logger.info(f"Enviando para UAZ API (POST): url={url}")
+            logger.info(f"Enviando para API (POST): url={url}")
             response = requests.post(url, headers=headers, json=payload, timeout=10)
             
             if response.status_code >= 400:
@@ -310,7 +317,9 @@ def _sanitize_number(num: Optional[str]) -> Optional[str]:
     return re.sub(r"\D", "", s) or None
 
 def send_presence_signal(number: str, presence: str) -> bool:
-    base = (settings.whatsapp_api_url or "").rstrip("/")
+    base = get_api_base_url()
+    if not base: return False
+
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
@@ -426,7 +435,7 @@ def buffer_loop(telefone: str):
 
 @app.get("/")
 async def root():
-    return {"status": "online", "service": "Agente de Supermercado", "version": "1.1.0"}
+    return {"status": "online", "service": "Agente de Supermercado", "version": "1.2.0"}
 
 @app.get("/health")
 async def health_check():
@@ -442,7 +451,6 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks):
         payload = await request.json()
         logger.info(f"Webhook recebido: {payload}")
 
-        # Normalizar e extrair (AGORA INCLUI TRANSCRIÇÃO DE ÁUDIO)
         normalized = _extract_incoming(payload)
         
         telefone = normalized.get("telefone")
@@ -457,18 +465,15 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks):
         if not mensagem_texto:
             return JSONResponse(status_code=200, content={"status": "ignored", "reason": "no_text_or_audio"})
 
-        # Logs e filtros de auto-mensagem
         logger.info(f"Normalizado: telefone={telefone} type={message_type} texto={mensagem_texto[:50]}")
 
         if from_me:
-            # Salvar histórico mas não responder
             try:
                 hist = get_session_history(telefone)
                 hist.add_ai_message(mensagem_texto or "")
             except: pass
             return JSONResponse(status_code=200, content={"status": "ignored", "reason": "from_me"})
 
-        # Checar cooldown
         numero = _sanitize_number(telefone) or telefone
         active, ttl = is_agent_in_cooldown(numero)
         if active:
@@ -476,7 +481,6 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks):
             push_message_to_buffer(numero, mensagem_texto)
             return JSONResponse(status_code=200, content={"status": "cooldown"})
 
-        # Iniciar presença "digitando" (ou "recording" se fosse áudio, mas o agente responde texto)
         try:
             sess = presence_sessions.get(numero)
             if (not sess) or sess.get("cancel"):
@@ -484,7 +488,6 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks):
                 threading.Thread(target=presence_loop, args=(numero, "composing", 30000), daemon=True).start()
         except: pass
 
-        # Buffer e Agregação
         try:
             ok_push = push_message_to_buffer(numero, mensagem_texto)
             if not ok_push:
