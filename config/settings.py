@@ -23,16 +23,10 @@ class Settings(BaseSettings):
     moonshot_api_key: Optional[str] = None
     moonshot_api_url: str = "https://api.moonshot.ai/anthropic"
     
-    # Supabase
-    # Removido: campos de Supabase (não utilizados)
-    
-    # Cohere (opcional, não utilizado atualmente)
-    cohere_api_key: str | None = None
-    
     # Postgres
     postgres_connection_string: str
-    postgres_table_name: str = "memoria"  # Nome da tabela para histórico de mensagens (padrão: memoria)
-    postgres_message_limit: int = 12  # Número de mensagens recentes usadas pelo agente (0 = ilimitado)
+    postgres_table_name: str = "memoria"
+    postgres_message_limit: int = 12
     
     # Redis
     redis_host: str = "localhost"
@@ -44,24 +38,23 @@ class Settings(BaseSettings):
     supermercado_base_url: str
     supermercado_auth_token: str
 
-    # Consulta de EAN (estoque/preço) via endpoint externo
+    # Consulta de EAN (estoque/preço)
     estoque_ean_base_url: str = "http://45.178.95.233:5001/api/Produto/GetProdutosEAN"
 
     # EAN Smart Responder (Supabase Functions)
     smart_responder_url: str = ""
-    # Backwards compatibility: existing single token
     smart_responder_token: str = ""
-    # Preferred: separate auth and apikey, aligning with n8n setup
     smart_responder_auth: str = ""
     smart_responder_apikey: str = ""
-    # Pré-resolvedor: desativado por padrão (fluxo removido)
     pre_resolver_enabled: bool = False
     
-    # WhatsApp API
-    whatsapp_api_url: str
+    # WhatsApp / UAZ API
+    # WHATSAPP_API_URL mantido para compatibilidade, mas UAZ_API_URL tem prioridade
+    whatsapp_api_url: Optional[str] = None 
+    uaz_api_url: Optional[str] = None      # <--- NOVA VARIÁVEL ESPECÍFICA
+    
     whatsapp_token: str
     whatsapp_method: str = "POST"
-    # Número do WhatsApp do próprio agente (para filtrar mensagens auto-enviadas)
     whatsapp_agent_number: str | None = None
     
     # Servidor
@@ -72,11 +65,8 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
     log_file: str = "logs/agente.log"
-
-    # Prompt do agente (caminho opcional para arquivo externo)
-    agent_prompt_path: str | None = None
     
-    # Config V1 legacy removida; usando model_config (Pydantic v2)
+    agent_prompt_path: str | None = None
 
 
 # Instância global de configurações
