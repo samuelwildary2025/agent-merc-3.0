@@ -10,6 +10,7 @@ import requests
 from datetime import datetime
 import time
 import threading
+import re
 
 from config.settings import settings
 from config.logger import setup_logger
@@ -31,7 +32,7 @@ logger = setup_logger(__name__)
 app = FastAPI(
     title="Agente de Supermercado",
     description="API para atendimento automatizado via WhatsApp",
-    version="1.2.0"
+    version="1.2.1"
 )
 
 
@@ -71,7 +72,6 @@ class PresenceRequest(BaseModel):
 def get_api_base_url() -> str:
     """
     Retorna a URL base da API, priorizando UAZ_API_URL.
-    Evita conflitos com outras variáveis de ambiente.
     """
     # Prioridade: UAZ_API_URL > WHATSAPP_API_URL > String vazia
     url = (settings.uaz_api_url or settings.whatsapp_api_url or "").strip().rstrip("/")
@@ -80,23 +80,27 @@ def get_api_base_url() -> str:
 def transcribe_audio_uaz(message_id: str) -> Optional[str]:
     """
     Solicita a transcrição de áudio para a API da UAZ.
+    Usa o endpoint específico /message/download
     """
     if not message_id:
         return None
 
     base = get_api_base_url()
     if not base:
-        logger.error("❌ Nenhuma URL de API configurada (UAZ_API_URL ou WHATSAPP_API_URL).")
+        logger.error("❌ Nenhuma URL de API configurada.")
         return None
 
     # Montar URL do endpoint de download
+    # Remove qualquer path existente (como /send/text) para pegar a raiz
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
         url = f"{base_domain}/message/download"
     except Exception:
-        url = f"{base}/message/download"
+        # Fallback simples
+        clean_base = base.split("/send")[0].split("/message")[0]
+        url = f"{clean_base}/message/download"
 
     headers = {
         "Content-Type": "application/json",
@@ -138,8 +142,6 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normaliza payloads de diferentes provedores para um formato comum.
     """
-    import re
-
     def _sanitize_phone(raw: Any) -> Optional[str]:
         if raw is None: return None
         s = str(raw)
@@ -240,22 +242,24 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
 def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
     """
     Envia mensagem de resposta para o WhatsApp via API UAZ
+    Corrige o endpoint para /send/text
     """
     base = get_api_base_url()
     if not base:
         logger.error("❌ Nenhuma URL de API configurada para envio.")
         return False
 
+    # Montar URL correta para envio de texto
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
-        # Se for só o domínio, adiciona o path padrão
-        if not parsed.path or parsed.path == "/":
-            url = f"{base}/message/send"
-        else:
-            url = base
+        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+        # Endpoint corrigido baseado nos logs de sucesso
+        url = f"{base_domain}/send/text"
     except Exception:
-        url = f"{base}/message/send"
+        # Fallback
+        clean_base = base.split("/message")[0]
+        url = f"{clean_base}/send/text"
     
     headers = {
         "Accept": "application/json",
@@ -282,9 +286,9 @@ def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
     
     try:
         for i, msg in enumerate(mensagens):
-            import re
             numero_sanitizado = re.sub(r"\D", "", telefone or "")
-            # Payload padrão UAZ
+            
+            # Payload correto para o endpoint /send/text
             payload = {"number": numero_sanitizado, "text": msg, "openTicket": "1"}
             
             logger.info(f"Enviando para API (POST): url={url}")
@@ -310,7 +314,6 @@ buffer_sessions: Dict[str, Dict[str, Any]] = {}
 
 def _sanitize_number(num: Optional[str]) -> Optional[str]:
     if not num: return None
-    import re
     s = str(num)
     if "@" in s: s = s.split("@")[0]
     if ":" in s: s = s.split(":")[-1]
@@ -320,13 +323,14 @@ def send_presence_signal(number: str, presence: str) -> bool:
     base = get_api_base_url()
     if not base: return False
 
+    # Montar URL para presença (/message/presence)
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
         url = f"{base_domain}/message/presence"
     except Exception:
-        url = f"{base}/presence"
+        url = f"{base}/message/presence"
 
     headers = {
         "Content-Type": "application/json",
@@ -435,7 +439,7 @@ def buffer_loop(telefone: str):
 
 @app.get("/")
 async def root():
-    return {"status": "online", "service": "Agente de Supermercado", "version": "1.2.0"}
+    return {"status": "online", "service": "Agente de Supermercado", "version": "1.2.1"}
 
 @app.get("/health")
 async def health_check():
