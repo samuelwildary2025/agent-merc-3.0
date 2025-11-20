@@ -32,7 +32,7 @@ logger = setup_logger(__name__)
 app = FastAPI(
     title="Agente de Supermercado",
     description="API para atendimento automatizado via WhatsApp",
-    version="1.2.1"
+    version="1.2.2"
 )
 
 
@@ -91,15 +91,13 @@ def transcribe_audio_uaz(message_id: str) -> Optional[str]:
         return None
 
     # Montar URL do endpoint de download
-    # Remove qualquer path existente (como /send/text) para pegar a raiz
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
         url = f"{base_domain}/message/download"
     except Exception:
-        # Fallback simples
-        clean_base = base.split("/send")[0].split("/message")[0]
+        clean_base = base.split("/message")[0]
         url = f"{clean_base}/message/download"
 
     headers = {
@@ -107,7 +105,7 @@ def transcribe_audio_uaz(message_id: str) -> Optional[str]:
         "token": (settings.whatsapp_token or "").strip()
     }
     
-    # Payload conforme documentação UAZ
+    # Payload para transcrição
     payload = {
         "id": message_id,
         "transcribe": True,
@@ -128,7 +126,7 @@ def transcribe_audio_uaz(message_id: str) -> Optional[str]:
                 logger.info(f"✅ Áudio transcrito: '{texto}'")
                 return texto
             else:
-                logger.warning(f"⚠️ API retornou 200 mas sem 'transcription': {data}")
+                logger.warning(f"⚠️ API retornou 200 mas sem 'transcription'. Resposta: {data}")
         else:
             logger.error(f"❌ Falha na transcrição. Status: {response.status_code} Body: {response.text}")
             
@@ -141,6 +139,7 @@ def transcribe_audio_uaz(message_id: str) -> Optional[str]:
 def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normaliza payloads de diferentes provedores para um formato comum.
+    Agora com detecção robusta de ÁUDIO/PTT.
     """
     def _sanitize_phone(raw: Any) -> Optional[str]:
         if raw is None: return None
@@ -152,7 +151,6 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
     chat = payload.get("chat") or {}
     message_any = payload.get("message") or {}
     
-    # Tratamento para webhooks legados que enviam lista
     if isinstance(payload.get("messages"), list):
         try:
             m0 = payload["messages"][0]
@@ -161,23 +159,47 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
         except: pass
 
     mensagem_texto = payload.get("text")
-    message_type = payload.get("messageType") or "text"
     message_id = payload.get("id") or payload.get("messageid")
     from_me = False
+    
+    # Detecção inicial de tipo
+    message_type = payload.get("messageType") or "text"
 
     if isinstance(message_any, dict):
-        message_type = message_any.get("type") or message_type
+        # Extrair IDs e flags
         message_id = message_any.get("messageid") or message_any.get("id") or message_id
         from_me = bool(message_any.get("fromMe") or message_any.get("wasSentByApi") or False)
         
+        # --- LÓGICA DE DETECÇÃO DE TIPO MELHORADA ---
+        raw_type = message_any.get("messageType")  # Ex: AudioMessage
+        media_type = message_any.get("mediaType")  # Ex: ptt, audio, image
+        base_type = message_any.get("type")        # Ex: media, text
+
+        # Priorizar detecção de Áudio
+        if (raw_type and "audio" in str(raw_type).lower()) or \
+           (media_type in ("ptt", "audio")) or \
+           (base_type == "audio"):
+            message_type = "audio"
+        # Priorizar detecção de Imagem
+        elif (raw_type and "image" in str(raw_type).lower()) or \
+             (media_type == "image") or \
+             (base_type == "image"):
+            message_type = "image"
+        else:
+            # Se não for especial, usa o type padrão (ex: text, media genérico)
+            message_type = base_type or message_type
+
+        # Extração de texto (se houver)
         content = message_any.get("content")
         if isinstance(content, str) and not mensagem_texto:
             mensagem_texto = content
         elif isinstance(content, dict):
-            mensagem_texto = content.get("text") or mensagem_texto
+            # Se for audio/imagem, content pode ser dict com url, mimetype etc.
+            # Tentamos pegar caption ou text
+            mensagem_texto = content.get("text") or content.get("caption") or mensagem_texto
         
-        txt = message_any.get("text")
         if mensagem_texto is None:
+            txt = message_any.get("text")
             if isinstance(txt, dict):
                 mensagem_texto = txt.get("body")
             else:
@@ -200,32 +222,26 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
             telefone = cand_digits
             break
 
-    # Ajuste de tipos
+    # Normalização final da string do tipo
     msg_type_lower = str(message_type).lower()
-    if msg_type_lower in ("textmessage", "conversation", "extendedtextmessage"):
-        message_type = "text"
-    elif "audio" in msg_type_lower:
+    if "audio" in msg_type_lower or "ptt" in msg_type_lower:
         message_type = "audio"
     elif "image" in msg_type_lower:
         message_type = "image"
+    elif msg_type_lower in ("textmessage", "conversation", "extendedtextmessage"):
+        message_type = "text"
 
-    # Lógica de Áudio / Imagem
-    if isinstance(message_any, dict):
-        if message_type == "image" and not mensagem_texto:
-            img = message_any.get("image")
-            if isinstance(img, dict):
-                mensagem_texto = img.get("caption") or "[Imagem recebida]"
-            else:
-                mensagem_texto = "[Imagem recebida]"
-        
-        # Se for áudio, tenta transcrever se não tiver texto
-        elif message_type == "audio" and not mensagem_texto:
+    # --- PROCESSAMENTO ESPECÍFICO ---
+    if message_type == "image" and not mensagem_texto:
+        mensagem_texto = "[Imagem recebida]"
+    
+    elif message_type == "audio":
+        # Se não tem texto, tenta transcrever
+        if not mensagem_texto:
             if message_id:
                 transcricao = transcribe_audio_uaz(message_id)
                 if transcricao:
-                    mensagem_texto = transcricao
-                    # Prefixo para o agente identificar contexto
-                    mensagem_texto = f"[Áudio]: {mensagem_texto}"
+                    mensagem_texto = f"[Áudio]: {transcricao}"
                 else:
                     mensagem_texto = "[Mensagem de áudio recebida, mas não consegui ouvir]"
             else:
@@ -241,23 +257,19 @@ def _extract_incoming(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
     """
-    Envia mensagem de resposta para o WhatsApp via API UAZ
-    Corrige o endpoint para /send/text
+    Envia mensagem de resposta para o WhatsApp via API UAZ (endpoint /send/text)
     """
     base = get_api_base_url()
     if not base:
         logger.error("❌ Nenhuma URL de API configurada para envio.")
         return False
 
-    # Montar URL correta para envio de texto
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
         base_domain = f"{parsed.scheme}://{parsed.netloc}"
-        # Endpoint corrigido baseado nos logs de sucesso
         url = f"{base_domain}/send/text"
     except Exception:
-        # Fallback
         clean_base = base.split("/message")[0]
         url = f"{clean_base}/send/text"
     
@@ -267,7 +279,6 @@ def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
         "token": (settings.whatsapp_token or "").strip(),
     }
     
-    # Divisão de mensagens longas
     max_length = 4000
     mensagens = []
     
@@ -287,8 +298,6 @@ def send_whatsapp_message(telefone: str, mensagem: str) -> bool:
     try:
         for i, msg in enumerate(mensagens):
             numero_sanitizado = re.sub(r"\D", "", telefone or "")
-            
-            # Payload correto para o endpoint /send/text
             payload = {"number": numero_sanitizado, "text": msg, "openTicket": "1"}
             
             logger.info(f"Enviando para API (POST): url={url}")
@@ -323,7 +332,6 @@ def send_presence_signal(number: str, presence: str) -> bool:
     base = get_api_base_url()
     if not base: return False
 
-    # Montar URL para presença (/message/presence)
     try:
         from urllib.parse import urlparse
         parsed = urlparse(base)
@@ -439,7 +447,7 @@ def buffer_loop(telefone: str):
 
 @app.get("/")
 async def root():
-    return {"status": "online", "service": "Agente de Supermercado", "version": "1.2.1"}
+    return {"status": "online", "service": "Agente de Supermercado", "version": "1.2.2"}
 
 @app.get("/health")
 async def health_check():
