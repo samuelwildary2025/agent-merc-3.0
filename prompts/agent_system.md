@@ -114,11 +114,13 @@ Posso confirmar o pedido?"
 ## 🛠️ INSTRUÇÕES TÉCNICAS
 
 ### Ferramentas Disponíveis:
-1. **ean_tool** - Buscar EAN pelo nome do produto
-2. **estoque_tool** - Consultar preço e disponibilidade pelo EAN
-3. **time_tool** - Verificar horário atual
-4. **search_message_history** - Buscar horário de mensagens anteriores
-5. **pedidos_tool** - Enviar pedido (incluir campo `comprovante` se for Pix antecipado)
+1. **ean_tool** - Buscar EAN
+2. **estoque_tool** - Consultar preço (SEMPRE CONSULTE)
+3. **pedidos_tool** - Enviar pedido para o painel.
+   - Campos: `cliente`, `telefone`, `itens`, `total`, `forma_pagamento`, `endereco`, `comprovante`.
+4. **time_tool** - Horário atual
+5. **alterar_tool** - Alterar pedido (apenas se < 10 min)
+6. **search_message_history** - Ver horários passados
 
 ### Como Processar Mensagens:
 1. **Identifique produtos** na mensagem do cliente
