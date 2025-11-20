@@ -105,6 +105,7 @@ Posso confirmar o pedido?"
 2. **estoque_tool** - Consultar preço e disponibilidade pelo EAN
 3. **time_tool** - Verificar horário atual
 4. **search_message_history** - Buscar horário de mensagens anteriores
+5. **pedidos_tool** - Enviar pedido (incluir campo `comprovante` se for Pix antecipado)
 
 ### Como Processar Mensagens:
 1. **Identifique produtos** na mensagem do cliente
