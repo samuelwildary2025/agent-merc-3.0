@@ -70,9 +70,6 @@ def alterar_tool(telefone: str, json_body: str) -> str:
     return alterar(telefone, json_body)
 
 
-
-
-
 @tool
 def search_history_tool(telefone: str, keyword: str = None) -> str:
     """
@@ -175,7 +172,7 @@ ACTIVE_TOOLS = [
     estoque_tool,
     time_tool,
     search_history_tool,
-    pedidos_tool,  # <--- ADICIONADO AQUI (Correção Crítica)
+    pedidos_tool,
 ]
 
 
@@ -238,7 +235,8 @@ def _build_llm():
                 _u = _u.rstrip("/") + "/anthropic"
             _os.environ["ANTHROPIC_BASE_URL"] = _u
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temp, max_tokens=max_tokens)
+        # Correção: max_tokens não estava definido no escopo, removido por segurança se não for usado
+        return ChatAnthropic(model=model, temperature=temp)
     
     print(f"[LLM] Criando ChatOpenAI com modelo {model}")
     return ChatOpenAI(model=model, openai_api_key=settings.openai_api_key, temperature=temp)
@@ -286,17 +284,21 @@ def get_agent_graph():
 def run_agent_langgraph(telefone: str, mensagem: str) -> Dict[str, Any]:
     """
     Executa o agente LangGraph com uma mensagem e ID de sessão (telefone).
-    
-    Args:
-        telefone: Telefone do cliente (usado como session_id)
-        mensagem: Mensagem do cliente
-    
-    Returns:
-        Dict com 'output' (resposta do agente) e 'error' (se houver)
+    Salva o histórico no PostgreSQL para persistência.
     """
     print(f"[AGENT] Iniciando processamento para telefone: {telefone}")
     print(f"[AGENT] Mensagem: {mensagem}")
     
+    # 1. Carregar histórico do Banco para salvar a mensagem do usuário
+    # Isso garante que a mensagem de entrada fique salva na tabela 'memoria'
+    history_handler = None
+    try:
+        history_handler = get_session_history(telefone)
+        history_handler.add_user_message(mensagem)
+        logger.info(f"Mensagem do usuário salva no DB para {telefone}")
+    except Exception as e:
+        logger.error(f"Erro ao salvar mensagem do usuário no DB: {e}")
+
     try:
         agent = get_agent_graph()
         print(f"[AGENT] Agente carregado com {len(ACTIVE_TOOLS)} ferramentas ativas")
@@ -308,44 +310,40 @@ def run_agent_langgraph(telefone: str, mensagem: str) -> Dict[str, Any]:
         
         logger.info(f"Estado inicial preparado: {initial_state}")
         
-        # Configuração com session_id para checkpoint
+        # Configuração com session_id para checkpoint (RAM do LangGraph)
         config = {"configurable": {"thread_id": telefone}}
         
         # Executar grafo
         logger.info("Executando agente...")
         result = agent.invoke(initial_state, config)
         
-        # Debug: verificar estrutura do resultado
-        print(f"[DEBUG] Resultado do agente: {result}")
-        print(f"[DEBUG] Tipo do resultado: {type(result)}")
-        
         # Extrair última mensagem (resposta do agente)
+        output = "Desculpe, não consegui processar sua mensagem."
         if isinstance(result, dict) and "messages" in result:
             messages = result["messages"]
-            print(f"[DEBUG] Total de mensagens: {len(messages)}")
             if messages:
                 last_message = messages[-1]
-                print(f"[DEBUG] Última mensagem: {last_message}")
-                print(f"[DEBUG] Tipo da última mensagem: {type(last_message)}")
-                
                 if isinstance(last_message, AIMessage):
                     output = last_message.content
                 else:
                     output = str(last_message.content)
-                
-                print(f"[DEBUG] Conteúdo extraído: {output}")
             else:
-                print("[ERROR] Nenhuma mensagem retornada pelo agente")
-                output = "Desculpe, não consegui processar sua mensagem."
+                logger.error("Nenhuma mensagem retornada pelo agente")
         else:
-            print(f"[ERROR] Resultado inesperado do agente: {result}")
-            output = "Desculpe, não consegui processar sua mensagem."
+            logger.error(f"Resultado inesperado do agente: {result}")
         
         logger.info("✅ Agente LangGraph REACT executado com sucesso")
         logger.debug(f"Resposta: {output}")
         
-        # Redis removido - apenas buffer de mensagens mantido
-        
+        # 2. Salvar a resposta do Agente no Banco
+        # Isso garante que a resposta da IA fique salva na tabela 'memoria'
+        if history_handler:
+            try:
+                history_handler.add_ai_message(output)
+                logger.info(f"Resposta do agente salva no DB para {telefone}")
+            except Exception as e:
+                logger.error(f"Erro ao salvar resposta do agente no DB: {e}")
+
         return {"output": output, "error": None}
         
     except Exception as e:
