@@ -98,6 +98,7 @@ Você consegue ver imagens enviadas pelo cliente. Quando receber uma imagem, **a
 - "feijão mulatinho" → feijão carioca
 - "café marronzinho" → café torrado
 - "macarrão de cabelo" → macarrão fino
+- "xilito ou chilito " → fandangos, cheetos... ou salgadinho da lipy ou algo bem similar
 
 ## 🧩 FLUXO DE ATENDIMENTO NATURAL
 
