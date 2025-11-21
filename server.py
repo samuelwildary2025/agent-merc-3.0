@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 import requests
 from datetime import datetime
 import time
+import random  # <--- [NOVO] Para variar o tempo de leitura
 import threading
 import re
 import io
@@ -33,7 +34,7 @@ from tools.redis_tools import (
 
 logger = setup_logger(__name__)
 
-app = FastAPI(title="Agente de Supermercado", version="1.5.0")
+app = FastAPI(title="Agente de Supermercado", version="1.5.1")
 
 # --- Models ---
 class WhatsAppMessage(BaseModel):
@@ -291,6 +292,7 @@ presence_sessions = {}
 buffer_sessions = {}
 
 def send_presence(num, type_):
+    """Envia status de 'composing' (digitando) ou 'paused' (parado)."""
     base = get_api_base_url()
     if not base: return
     try:
@@ -305,14 +307,44 @@ def send_presence(num, type_):
     except: pass
 
 def process_async(tel, msg, mid=None):
+    """
+    Processa a mensagem com comportamento humanizado:
+    1. Espera um tempo (lendo).
+    2. Começa a digitar.
+    3. Processa (IA).
+    4. Para de digitar.
+    5. Envia resposta.
+    """
     try:
+        num = re.sub(r"\D", "", tel)
+        
+        # 1. SIMULAR "LENDO" A MENSAGEM
+        # Espera entre 2 a 4 segundos antes de começar a "digitar"
+        tempo_leitura = random.uniform(2.0, 4.0) 
+        time.sleep(tempo_leitura)
+
+        # 2. ATIVAR "DIGITANDO..."
+        send_presence(num, "composing")
+        
+        # 3. PROCESSAMENTO DA IA
         res = run_agent(tel, msg)
         txt = res.get("output", "Erro ao processar.")
+        
+        # 4. PARAR "DIGITANDO..." (Antes de enviar)
+        send_presence(num, "paused")
+        
+        # Pequena pausa para parecer natural
+        time.sleep(0.5)
+
+        # 5. ENVIAR A MENSAGEM
         send_whatsapp_message(tel, txt)
+
     except Exception as e:
         logger.error(f"Erro async: {e}")
     finally:
+        # Safety Net: Garante que para de digitar
         send_presence(tel, "paused")
+        presence_sessions.pop(re.sub(r"\D", "", tel), None)
 
 def buffer_loop(tel):
     try:
@@ -332,7 +364,7 @@ def buffer_loop(tel):
 
 # --- Endpoints ---
 @app.get("/")
-async def root(): return {"status":"online", "ver":"1.5.0"}
+async def root(): return {"status":"online", "ver":"1.5.1"}
 
 @app.get("/health")
 async def health(): return {"status":"healthy", "ts":datetime.now().isoformat()}
@@ -360,10 +392,11 @@ async def webhook(req: Request, tasks: BackgroundTasks):
             push_message_to_buffer(num, txt)
             return JSONResponse(content={"status":"cooldown"})
 
+        # [MODIFICADO] Removida a thread de "send_presence" manual para evitar conflito
+        # A presença agora é gerida exclusivamente dentro de 'process_async'
         try:
             if not presence_sessions.get(num):
                 presence_sessions[num] = True
-                threading.Thread(target=lambda: send_presence(num, "composing"), daemon=True).start()
         except: pass
 
         if push_message_to_buffer(num, txt):
