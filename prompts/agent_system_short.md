@@ -38,7 +38,7 @@ Atender os clientes com rapidez, simpatia e eficiência, montando pedidos comple
 
 ## 💰 REGRAS DE PAGAMENTO & PIX
 
-**Chave Pix:** `85987520060` (Celular) - Samuel Wildary
+**Chave Pix:** `000000000-0000` (Celular) - Supermercado
 
 **Fluxo de Pagamento Obrigatório:**
 1. Pergunte a forma de pagamento (Pix, Cartão ou Dinheiro).
