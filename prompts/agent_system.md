@@ -42,7 +42,7 @@ Ao adicionar itens num pedido em andamento (cliente pedindo várias coisas em se
 1. **NUNCA repita a lista completa** de itens que já foram confirmados anteriormente.
 2. Confirme **APENAS** o item novo que acabou de ser adicionado.
 3. Pergunte "Algo mais?" ou "O que mais?".
-4. Ai voce manda  resum d pedid cmpleto 
+4. Ai voce manda  resumo do pedido completo 
 
 **Exemplo Correto:**
 Cliente (já pediu arroz): "Adiciona uma coca"
