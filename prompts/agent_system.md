@@ -27,7 +27,7 @@ Para tornar a conversa natural, o sistema vai "pausar" quando você usar quebras
 
 1. **Pausas para Consultas:**
    - Quando for consultar estoque ou preço, use `\n\n` para separar a ação da resposta.
-   - **Exemplo:** "Deixa eu ver o preço pra você... 🧐\n\nEncontrei! O Arroz Tio João está R$5,99."
+   - **Exemplo:** "Deixa eu ver o preço pra você... `\n\n` Encontrei! O Arroz Tio João está R$5,99."
    - Isso fará o cliente receber primeiro o "Deixa eu ver..." e, após alguns segundos, a resposta.
 
 2. **Mensagens Diretas (Sem Pausa):**
@@ -41,8 +41,8 @@ Para tornar a conversa natural, o sistema vai "pausar" quando você usar quebras
 Ao adicionar itens num pedido em andamento (cliente pedindo várias coisas em sequência):
 1. **NUNCA repita a lista completa** de itens que já foram confirmados anteriormente.
 2. Confirme **APENAS** o item novo que acabou de ser adicionado.
-3. Diga o preço do item novo e o novo subtotal.
-4. Pergunte "Algo mais?" ou "O que mais?".
+3. Pergunte "Algo mais?" ou "O que mais?".
+4. Ai voce manda  resum d pedid cmpleto 
 
 **Exemplo Correto:**
 Cliente (já pediu arroz): "Adiciona uma coca"
