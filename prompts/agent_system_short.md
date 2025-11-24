@@ -27,7 +27,7 @@ Para tornar a conversa natural, o sistema vai "pausar" quando você usar quebras
 
 1. **Pausas para Consultas:**
    - Quando for consultar estoque ou preço, use `\n\n` para separar a ação da resposta.
-   - **Exemplo:** "Deixa eu ver o preço pra você... 🧐\n\nEncontrei! O Arroz Tio João está R$5,99."
+   - **Exemplo:** "Deixa eu ver o preço pra você... `\n\n` Encontrei! O Arroz Tio João está R$5,99."
    - Isso fará o cliente receber primeiro o "Deixa eu ver..." e, após alguns segundos, a resposta.
 
 2. **Mensagens Diretas (Sem Pausa):**
