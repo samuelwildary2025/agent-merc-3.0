@@ -1,9 +1,9 @@
 """
-Ferramentas HTTP para interação com a API do Supermercado
+Ferramentas HTTP para interação com a API do Supermercado (Versão SaaS Universal)
 """
 import requests
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from config.settings import settings
 from config.logger import setup_logger
 
@@ -19,17 +19,98 @@ def get_auth_headers() -> Dict[str, str]:
     }
 
 
+def _processar_produto_para_agente(produto_bruto: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    MIDDLEWARE UNIVERSAL (SaaS):
+    Traduz o JSON técnico do ERP para instruções de venda que o Agente entende.
+    Classifica o produto entre PESÁVEL, PACOTE FECHADO ou UNITÁRIO.
+    """
+    # 1. Extração e Limpeza de Dados
+    nome_sujo = produto_bruto.get("produto") or produto_bruto.get("nome") or produto_bruto.get("descricao") or "Produto sem nome"
+    
+    # Remove termos técnicos que poluem a fala da IA (opcional, mas recomendado)
+    termos_tecnicos = ["CBOX", "RESF", "CONG", "VACUO", "VÁCUO", "C/OSSO", "S/OSSO", "RESFRIADO", "CONGELADO"]
+    nome_limpo = nome_sujo
+    for termo in termos_tecnicos:
+        nome_limpo = nome_limpo.replace(termo, "").strip()
+
+    # 2. Lógica de Melhor Preço (Promoção vs Normal)
+    preco_normal = float(produto_bruto.get("vl_produto") or 0)
+    preco_promo = float(produto_bruto.get("preco_fidelidade_promocao") or produto_bruto.get("vl_promocao") or 0)
+    # Usa o promocional se for válido e menor que o normal
+    preco_final = preco_promo if (preco_promo > 0 and preco_promo < preco_normal) else preco_normal
+
+    # 3. Dados de Estoque
+    qtd_estoque = (
+        produto_bruto.get("qtd_produto") if "qtd_produto" in produto_bruto else 
+        produto_bruto.get("estoque") if "estoque" in produto_bruto else 
+        produto_bruto.get("quantidade") or 0
+    )
+    ativo = produto_bruto.get("ativo", True)
+    disponivel = ativo and (float(qtd_estoque) > 0)
+
+    # 4. CLASSIFICAÇÃO DE TIPO DE VENDA (A Lógica Universal)
+    is_fracionado = bool(produto_bruto.get("fracionado", False))
+    unidade_erp = str(produto_bruto.get("emb", "")).upper() # UN, KG, CX, PCT
+    
+    # Detecta se é PACOTE/CAIXA fechada (Industrializado)
+    termos_pacote = ["PCT", "PACOTE", "EMB", "CX", "CAIXA", "FARDO", "FD"]
+    eh_pacote = any(t in nome_sujo.split() for t in termos_pacote) or (unidade_erp in ["CX", "FD", "PCT"])
+
+    # Detecta se é PESÁVEL / GRANEL (Açougue, Frios, Hortifrúti)
+    # Regra: Unidade KG ou flag fracionado, e NÃO sendo um pacote fechado
+    tem_kg_no_nome = "KG" in nome_sujo.upper()
+    eh_pesavel = (is_fracionado or unidade_erp == "KG" or tem_kg_no_nome) and not eh_pacote
+
+    # 5. GERAÇÃO DA INSTRUÇÃO PARA A IA
+    tipo_venda = "UNITARIO"
+    unidade_final = "UN"
+    instrucao = "Venda normal por unidade. Preço fixo."
+
+    if eh_pacote:
+        tipo_venda = "EMBALAGEM_FECHADA"
+        unidade_final = unidade_erp if unidade_erp not in ["", "None"] else "PCT"
+        instrucao = (
+            f"📦 EMBALAGEM FECHADA: Este é um pacote/caixa fechado. "
+            f"Preço: R$ {preco_final:.2f} por {unidade_final}. "
+            f"Se o cliente pediu 'uma unidade' (ex: 'uma salsicha'), PERGUNTE se ele quer o PACOTE FECHADO ou se prefere solto a granel."
+        )
+
+    elif eh_pesavel:
+        tipo_venda = "PESAVEL"
+        unidade_final = "KG"
+        instrucao = (
+            f"⚖️ PESO VARIÁVEL (Açougue/Frios/Hortifrúti): "
+            f"O preço R$ {preco_final:.2f} é por QUILO (KG). "
+            f"1. Se o cliente pedir por UNIDADE (ex: '2 calabresas', '3 maçãs'): "
+            f"   - ACEITE o pedido. "
+            f"   - AVISE que o valor é APROXIMADO e será confirmado na balança. "
+            f"   - No campo 'observacao' do pedido, escreva a intenção original (ex: 'CLIENTE QUER 2 UNIDADES'). "
+            f"2. Se pedir por VALOR (ex: '20 reais'): "
+            f"   - Calcule o peso estimado e registre na observação."
+        )
+
+    # 6. Montagem do JSON Final
+    return {
+        "id": produto_bruto.get("id_produto") or produto_bruto.get("id"),
+        "produto": nome_limpo,
+        "preco": float(preco_final),
+        "estoque_disponivel": disponivel,
+        "tipo_venda": tipo_venda,           # UNITARIO, PESAVEL, EMBALAGEM_FECHADA
+        "unidade": unidade_final,
+        "INSTRUCAO_IA": instrucao,          # <--- A IA lerá isso para saber como agir
+        
+        # Metadados originais ocultos (para debug se precisar)
+        "meta_original": nome_sujo,
+        "meta_emb": unidade_erp
+    }
+
+
 def estoque(url: str) -> str:
     """
-    Consulta o estoque e preço de produtos no sistema do supermercado.
-    
-    Args:
-        url: URL completa para consulta (ex: .../api/produtos/consulta?nome=arroz)
-    
-    Returns:
-        JSON string com informações do produto ou mensagem de erro
+    Consulta o estoque (busca por nome) e aplica o middleware universal.
     """
-    logger.info(f"Consultando estoque: {url}")
+    logger.info(f"Consultando estoque (SaaS): {url}")
     
     try:
         response = requests.get(
@@ -40,49 +121,87 @@ def estoque(url: str) -> str:
         response.raise_for_status()
         
         data = response.json()
-        logger.info(f"Estoque consultado com sucesso: {len(data) if isinstance(data, list) else 1} produto(s)")
         
-        return json.dumps(data, indent=2, ensure_ascii=False)
+        # Normaliza para lista se vier objeto único
+        if isinstance(data, dict):
+            data = [data]
+        elif not isinstance(data, list):
+            data = []
+
+        # Aplica o Middleware Universal em cada item
+        itens_processados = [_processar_produto_para_agente(item) for item in data]
+        
+        logger.info(f"Estoque processado: {len(itens_processados)} produtos encontrados")
+        return json.dumps(itens_processados, indent=2, ensure_ascii=False)
     
     except requests.exceptions.Timeout:
-        error_msg = "Erro: Timeout ao consultar estoque. Tente novamente."
-        logger.error(error_msg)
-        return error_msg
-    
-    except requests.exceptions.HTTPError as e:
-        error_msg = f"Erro HTTP ao consultar estoque: {e.response.status_code} - {e.response.text}"
-        logger.error(error_msg)
-        return error_msg
-    
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Erro ao consultar estoque: {str(e)}"
-        logger.error(error_msg)
-        return error_msg
-    
-    except json.JSONDecodeError:
-        error_msg = "Erro: Resposta da API não é um JSON válido."
-        logger.error(error_msg)
-        return error_msg
+        msg = "Erro: Timeout ao consultar estoque. Tente novamente."
+        logger.error(msg)
+        return msg
+    except Exception as e:
+        logger.error(f"Erro em estoque: {e}")
+        return f"Erro técnico ao consultar estoque: {str(e)}"
+
+
+def estoque_preco(ean: str) -> str:
+    """
+    Consulta preço/estoque por EAN e aplica o middleware universal.
+    """
+    base = (settings.estoque_ean_base_url or "").strip().rstrip("/")
+    if not base:
+        return "Erro: URL de estoque EAN não configurada no .env"
+
+    # Manter apenas dígitos do EAN
+    ean_digits = "".join(filter(str.isdigit, ean))
+    if not ean_digits:
+        return "Erro: EAN inválido (informe apenas números)."
+
+    url = f"{base}/{ean_digits}"
+    logger.info(f"Consultando EAN (SaaS): {url}")
+
+    try:
+        response = requests.get(url, headers=get_auth_headers(), timeout=10)
+        
+        # Tratamento para APIs que retornam 404 quando produto não existe
+        if response.status_code == 404:
+            return "[]" 
+            
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Normaliza para lista
+        items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+
+        # Aplica o Middleware Universal
+        # Filtramos apenas itens disponíveis para limpar a visão da IA,
+        # mas você pode remover o 'if' se quiser que a IA veja itens sem estoque.
+        itens_processados = []
+        for item in items:
+            processado = _processar_produto_para_agente(item)
+            if processado["estoque_disponivel"]: 
+                itens_processados.append(processado)
+
+        logger.info(f"EAN {ean_digits}: {len(itens_processados)} item(s) disponíveis")
+        return json.dumps(itens_processados, indent=2, ensure_ascii=False)
+
+    except requests.exceptions.Timeout:
+        return "Erro: Demorou muito para consultar o código de barras."
+    except Exception as e:
+        logger.error(f"Erro ao consultar EAN: {e}")
+        return f"Erro técnico ao buscar produto pelo código: {str(e)}"
 
 
 def pedidos(json_body: str) -> str:
     """
-    Envia um pedido finalizado para o painel dos funcionários (dashboard).
-    
-    Args:
-        json_body: JSON string com os detalhes do pedido
-                   Exemplo: '{"cliente": "João", "itens": [{"produto": "Arroz", "quantidade": 1}]}'
-    
-    Returns:
-        Mensagem de sucesso com resposta do servidor ou mensagem de erro
+    Envia um pedido finalizado para o painel.
     """
     url = f"{settings.supermercado_base_url}/pedidos/"
-    logger.info(f"Enviando pedido para: {url}")
+    logger.info(f"Enviando pedido: {url}")
     
     try:
-        # Validar JSON
+        # Validar se é JSON válido antes de enviar
         data = json.loads(json_body)
-        logger.debug(f"Dados do pedido: {data}")
         
         response = requests.post(
             url,
@@ -92,55 +211,30 @@ def pedidos(json_body: str) -> str:
         )
         response.raise_for_status()
         
-        result = response.json()
-        success_msg = f"✅ Pedido enviado com sucesso!\n\nResposta do servidor:\n{json.dumps(result, indent=2, ensure_ascii=False)}"
-        logger.info("Pedido enviado com sucesso")
+        # Tenta extrair ID do pedido para confirmação
+        resp_json = response.json()
+        pedido_id = resp_json.get('id') or resp_json.get('numero_pedido') or 'N/A'
         
-        return success_msg
-    
+        return f"✅ Pedido enviado com sucesso! (ID: {pedido_id})"
+        
     except json.JSONDecodeError:
-        error_msg = "Erro: O corpo da requisição não é um JSON válido."
-        logger.error(error_msg)
-        return error_msg
-    
-    except requests.exceptions.Timeout:
-        error_msg = "Erro: Timeout ao enviar pedido. Tente novamente."
-        logger.error(error_msg)
-        return error_msg
-    
-    except requests.exceptions.HTTPError as e:
-        error_msg = f"Erro HTTP ao enviar pedido: {e.response.status_code} - {e.response.text}"
-        logger.error(error_msg)
-        return error_msg
-    
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Erro ao enviar pedido: {str(e)}"
-        logger.error(error_msg)
-        return error_msg
+        return "Erro: O formato do pedido está incorreto (JSON inválido)."
+    except Exception as e:
+        logger.error(f"Erro ao enviar pedido: {e}")
+        return f"Erro ao enviar pedido para o sistema: {str(e)}"
 
 
 def alterar(telefone: str, json_body: str) -> str:
     """
-    Atualiza um pedido existente no painel dos funcionários (dashboard).
-    
-    Args:
-        telefone: Telefone do cliente para identificar o pedido
-        json_body: JSON string com os dados a serem atualizados
-    
-    Returns:
-        Mensagem de sucesso com resposta do servidor ou mensagem de erro
+    Atualiza um pedido existente (ex: adicionar item esquecido).
     """
-    # Remove caracteres não numéricos do telefone
     telefone_limpo = "".join(filter(str.isdigit, telefone))
     url = f"{settings.supermercado_base_url}/pedidos/telefone/{telefone_limpo}"
     
-    logger.info(f"Atualizando pedido para telefone: {telefone_limpo}")
+    logger.info(f"Atualizando pedido telefone {telefone_limpo}")
     
     try:
-        # Validar JSON
         data = json.loads(json_body)
-        logger.debug(f"Dados de atualização: {data}")
-        
         response = requests.put(
             url,
             headers=get_auth_headers(),
@@ -148,389 +242,48 @@ def alterar(telefone: str, json_body: str) -> str:
             timeout=10
         )
         response.raise_for_status()
+        return "✅ Pedido atualizado com sucesso!"
         
-        result = response.json()
-        success_msg = f"✅ Pedido atualizado com sucesso!\n\nResposta do servidor:\n{json.dumps(result, indent=2, ensure_ascii=False)}"
-        logger.info("Pedido atualizado com sucesso")
-        
-        return success_msg
-    
-    except json.JSONDecodeError:
-        error_msg = "Erro: O corpo da requisição não é um JSON válido."
-        logger.error(error_msg)
-        return error_msg
+    except Exception as e:
+        logger.error(f"Erro ao atualizar pedido: {e}")
+        return f"Erro ao atualizar pedido: {str(e)}"
 
 
 def ean_lookup(query: str) -> str:
     """
-    Busca informações/EAN do produto mencionado via Supabase Functions (smart-responder).
-
-    Envia POST para settings.smart_responder_url com header Authorization Bearer e body {"query": query}.
-
-    Args:
-        query: Texto com o nome/descrição do produto ou entrada de chat.
-
-    Returns:
-        String com JSON de resposta ou mensagem de erro amigável.
+    Consulta Smart Responder (Base de Conhecimento / RAG via Supabase).
+    Usa IA para identificar produtos por descrição ou imagem.
     """
-    url = (settings.smart_responder_url or "").strip()
-    # Prefer new envs; fall back to legacy token
-    auth_token = (settings.smart_responder_auth or settings.smart_responder_token or "").strip()
-    api_key = (settings.smart_responder_apikey or "").strip()
+    url = (settings.smart_responder_url or "").strip().replace("`", "")
+    token = (settings.smart_responder_auth or settings.smart_responder_token or "").strip()
+    apikey = (settings.smart_responder_apikey or "").strip()
+    
+    if not url or not token:
+        return "Erro: Configuração de IA (Smart Responder) não encontrada no .env"
 
-    if not url or not auth_token:
-        msg = "Erro: SMART_RESPONDER_URL/AUTH não configurados no .env"
-        logger.error(msg)
-        return msg
-
-    # Remover crases/backticks caso estejam coladas ao URL
-    url = url.replace("`", "")
-
-    # Normalizar Authorization: aceitar com ou sem prefixo 'Bearer '
-    auth_value = auth_token if auth_token.lower().startswith("bearer ") else f"Bearer {auth_token}"
+    # Normaliza token Bearer
+    auth_header = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    
     headers = {
-        "Authorization": auth_value,
+        "Authorization": auth_header,
         "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Accept": "application/json"
     }
-    # Incluir apikey somente se explicitamente configurada
-    if api_key:
-        headers["apikey"] = api_key
-
-    payload = {"query": query}
-    logger.info(f"Consultando smart-responder: {url} query='{query[:80]}'")
-
-    def _extract_pairs_from_text(text: str):
-        import re
-        eans = re.findall(r'"codigo_ean"\s*:\s*([0-9]+)', text)
-        names = re.findall(r'"produto"\s*:\s*"([^"]+)"', text)
-        # Emparelhar por ordem de aparição; não limitar aqui
-        pairs = []
-        limit = min(len(eans), len(names)) or max(len(eans), len(names))
-        for i in range(min(limit, 50)):
-            e = eans[i] if i < len(eans) else None
-            n = names[i] if i < len(names) else None
-            if e or n:
-                pairs.append((e, n))
-        return pairs
-
-    def _format_summary(pairs):
-        if not pairs:
-            return None
-        lines = ["EANS_ENCONTRADOS:"]
-        for idx, (e, n) in enumerate(pairs, 1):
-            if e and n:
-                lines.append(f"{idx}) {e} - {n}")
-            elif e:
-                lines.append(f"{idx}) {e}")
-            elif n:
-                lines.append(f"{idx}) {n}")
-        return "\n".join(lines)
+    if apikey:
+        headers["apikey"] = apikey
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        status = resp.status_code
-        text = resp.text
-        logger.info(f"smart-responder retorno: status={status}")
-
-        # Tentar interpretar como JSON e extrair EAN/nome quando possível
+        logger.info(f"Consultando IA RAG: {query[:50]}...")
+        resp = requests.post(url, headers=headers, json={"query": query}, timeout=15)
+        
+        # Tenta formatar se for JSON, senão devolve texto bruto
         try:
-            data = resp.json()
-
-            # Caminho 1: procurar pares diretamente em campos estruturados
-            pairs = []
-            def try_obj(d: Dict[str, Any]):
-                # EAN pode ser string ou número
-                e = None
-                for k in ["ean", "ean_code", "codigo_ean", "barcode", "gtin"]:
-                    v = d.get(k)
-                    if isinstance(v, (str, int)) and str(v).strip():
-                        e = str(v).strip()
-                        break
-                n = None
-                for k in ["produto", "product", "name", "nome", "title", "descricao", "description"]:
-                    v = d.get(k)
-                    if isinstance(v, str) and v.strip():
-                        n = v.strip()
-                        break
-                if e or n:
-                    pairs.append((e, n))
-
-            def walk(payload: Any):
-                if isinstance(payload, dict):
-                    # Primeiro tenta extrair diretamente do objeto
-                    try_obj(payload)
-                    # Percorre TODOS os campos do dict, não apenas nomes comuns
-                    for _, val in payload.items():
-                        if isinstance(val, dict):
-                            walk(val)
-                        elif isinstance(val, list):
-                            for it in val:
-                                walk(it)
-                        elif isinstance(val, str):
-                            # Conteúdos string (ex.: campo "content" vindo do Supabase)
-                            pairs.extend(_extract_pairs_from_text(val))
-                elif isinstance(payload, list):
-                    for it in payload:
-                        walk(it)
-                elif isinstance(payload, str):
-                    pairs.extend(_extract_pairs_from_text(payload))
-
-            walk(data)
-
-            # Ordenar pares por relevância em relação ao 'query' e limitar na sumarização
-            def _strip_accents(s: str) -> str:
-                try:
-                    import unicodedata
-                    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-                except Exception:
-                    return s
-
-            def _score(q: str, nome: str | None) -> float:
-                if not nome:
-                    return 0.0
-                import re as _re
-                qn = _strip_accents((q or '').lower())
-                nn = _strip_accents((nome or '').lower())
-                score = 0.0
-                for tok in _re.findall(r"[\wáéíóúâêîôûãõç]+", qn):
-                    if tok and tok in nn:
-                        score += 1.0
-                for m in _re.findall(r"(\d+\s*(g|kg|ml|l|litro|un))", qn):
-                    if m[0] in nn:
-                        score += 1.5
-                return score
-
-            # Pontuar por relevância e filtrar apenas itens que casam com a consulta
-            scored = [(pn, _score(query, pn[1])) for pn in pairs]
-            # Ordena por score desc
-            ordered = [pn for pn, sc in sorted(scored, key=lambda x: x[1], reverse=True)]
-            # Mantém apenas os com score >= 1.0 (pelo menos um token da consulta)
-            top_relevant = [pn for pn, sc in sorted(scored, key=lambda x: x[1], reverse=True) if sc >= 1.0][:10]
-            # Fallback: se não houver relevantes, use os primeiros pares retornados
-            used_pairs = top_relevant if top_relevant else ordered[:10]
-            summary = _format_summary(used_pairs)
-            if summary:
-                sanitized = summary.replace("\n", "; ")
-                logger.info(f"smart-responder resumo extraído: {sanitized}")
-                return f"{summary}\n\n{json.dumps(data, indent=2, ensure_ascii=False)}"
-            else:
-                return json.dumps(data, indent=2, ensure_ascii=False)
-        except Exception:
-            # Se não for JSON, tentar extrair com regex do texto bruto
-            pairs = _extract_pairs_from_text(text)
-            # Aplicar o mesmo filtro de relevância no texto bruto
-            def _strip_accents(s: str) -> str:
-                try:
-                    import unicodedata
-                    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-                except Exception:
-                    return s
-            def _score(q: str, nome: str | None) -> float:
-                if not nome:
-                    return 0.0
-                import re as _re
-                qn = _strip_accents((q or '').lower())
-                nn = _strip_accents((nome or '').lower())
-                score = 0.0
-                for tok in _re.findall(r"[\wáéíóúâêîôûãõç]+", qn):
-                    if tok and tok in nn:
-                        score += 1.0
-                for m in _re.findall(r"(\d+\s*(g|kg|ml|l|litro|un))", qn):
-                    if m[0] in nn:
-                        score += 1.5
-                return score
-            scored = [(pn, _score(query, pn[1])) for pn in pairs]
-            top_relevant = [pn for pn, sc in sorted(scored, key=lambda x: x[1], reverse=True) if sc >= 1.0][:10]
-            used_pairs = top_relevant if top_relevant else [pn for pn, _ in scored][:10]
-            summary = _format_summary(used_pairs)
-            if summary:
-                return f"{summary}\n\n{text}"
-            return text
-
-    except requests.exceptions.Timeout:
-        msg = "Erro: Timeout ao consultar smart-responder. Tente novamente."
-        logger.error(msg)
-        return msg
-    except requests.exceptions.HTTPError as e:
-        msg = f"Erro HTTP no smart-responder: {getattr(e.response, 'status_code', '?')} - {getattr(e.response, 'text', '')}"
-        logger.error(msg)
-        return msg
-    except requests.exceptions.RequestException as e:
-        msg = f"Erro ao consultar smart-responder: {str(e)}"
-        logger.error(msg)
-        return msg
-
-
-def estoque_preco(ean: str) -> str:
-    """
-    Consulta preço e disponibilidade pelo EAN.
-
-    Monta a URL completa concatenando o EAN ao final de settings.estoque_ean_base_url.
-    Exemplo: {base}/7891149103300
-
-    Args:
-        ean: Código EAN do produto (apenas dígitos).
-
-    Returns:
-        JSON string com informações do produto ou mensagem de erro amigável.
-    """
-    base = (settings.estoque_ean_base_url or "").strip().rstrip("/")
-    if not base:
-        msg = "Erro: ESTOQUE_EAN_BASE_URL não configurado no .env"
-        logger.error(msg)
-        return msg
-
-    # manter apenas dígitos no EAN
-    ean_digits = "".join(ch for ch in ean if ch.isdigit())
-    if not ean_digits:
-        msg = "Erro: EAN inválido. Informe apenas números."
-        logger.error(msg)
-        return msg
-
-    url = f"{base}/{ean_digits}"
-    logger.info(f"Consultando estoque_preco por EAN: {url}")
-
-    headers = {
-        "Accept": "application/json",
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-
-        # resposta esperada: lista de objetos
-        try:
-            data = resp.json()
-        except json.JSONDecodeError:
-            txt = resp.text
-            logger.warning("Resposta não é JSON válido; retornando texto bruto")
-            return txt
-
-        # Se vier um único objeto, normalizar para lista
-        items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-
-        # Heurística de extração de preço
-        PRICE_KEYS = (
-            "vl_produto",
-            "vl_produto_normal",
-            "preco",
-            "preco_venda",
-            "valor",
-            "valor_unitario",
-            "preco_unitario",
-            "atacadoPreco",
-        )
-
-        # Possíveis chaves de quantidade de estoque (remover da saída)
-        STOCK_QTY_KEYS = {
-            "estoque", "qtd", "qtde", "qtd_estoque", "quantidade", "quantidade_disponivel",
-            "quantidadeDisponivel", "qtdDisponivel", "qtdEstoque", "estoqueAtual", "saldo",
-            "qty", "quantity", "stock", "amount", "qtd_produto", "qtd_movimentacao"
-        }
-
-        # Possíveis indicadores de disponibilidade
-        BOOL_AVAIL_KEYS = ("disponibilidade", "disponivel", "available", "in_stock", "em_estoque", "ativo")
-        STATUS_KEYS = ("situacao", "situacaoEstoque", "status", "statusEstoque")
-
-        def _parse_float(val) -> float | None:
-            try:
-                s = str(val).strip()
-                if not s:
-                    return None
-                # aceita formato brasileiro
-                s = s.replace(".", "").replace(",", ".") if s.count(",") == 1 and s.count(".") > 1 else s.replace(",", ".")
-                return float(s)
-            except Exception:
-                return None
-
-        def _has_positive_qty(d: Dict[str, Any]) -> bool:
-            for k in STOCK_QTY_KEYS:
-                if k in d:
-                    v = d.get(k)
-                    try:
-                        n = float(str(v).replace(",", "."))
-                        if n > 0:
-                            return True
-                    except Exception:
-                        # ignore não numérico
-                        pass
-            return False
-
-        def _status_available(d: Dict[str, Any]) -> bool:
-            for k in STATUS_KEYS:
-                v = d.get(k)
-                if isinstance(v, str):
-                    s = v.strip().lower()
-                    if any(x in s for x in ["dispon", "em estoque", "in stock", "ativo"]):
-                        return True
-            return False
-
-        def _is_available(d: Dict[str, Any]) -> bool:
-            # APENAS produtos com estoque real positivo (> 0)
-            if _has_positive_qty(d):
-                return True
+            return json.dumps(resp.json(), indent=2, ensure_ascii=False)
+        except:
+            return resp.text
             
-            return False
-
-        def _extract_qty(d: Dict[str, Any]) -> float | None:
-            for k in STOCK_QTY_KEYS:
-                if k in d:
-                    try:
-                        return float(str(d.get(k)).replace(',', '.'))
-                    except Exception:
-                        pass
-            return None
-
-        def _extract_price(d: Dict[str, Any]) -> float | None:
-            for k in PRICE_KEYS:
-                if k in d:
-                    val = _parse_float(d.get(k))
-                    if val is not None:
-                        return val
-            return None
-
-        sanitized: list[Dict[str, Any]] = []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            if not _is_available(it):
-                continue  # manter apenas itens com estoque/disponibilidade
-
-            clean = {k: v for k, v in it.items() if k not in STOCK_QTY_KEYS}
-
-            # Normalizar disponibilidade
-            if "disponibilidade" not in clean:
-                clean["disponibilidade"] = True
-
-            # Normalizar preço em campo unificado
-            price = _extract_price(it)
-            if price is not None:
-                clean["preco"] = price
-
-            qty = _extract_qty(it)
-            if qty is not None:
-                clean["quantidade"] = qty
-
-            sanitized.append(clean)
-
-        logger.info(f"EAN {ean_digits}: {len(sanitized)} item(s) disponíveis após filtragem")
-
-        return json.dumps(sanitized, indent=2, ensure_ascii=False)
-
     except requests.exceptions.Timeout:
-        msg = "Erro: Timeout ao consultar preço/estoque por EAN. Tente novamente."
-        logger.error(msg)
-        return msg
-    except requests.exceptions.HTTPError as e:
-        status = getattr(e.response, "status_code", "?")
-        body = getattr(e.response, "text", "")
-        msg = f"Erro HTTP ao consultar EAN: {status} - {body}"
-        logger.error(msg)
-        return msg
-    except requests.exceptions.RequestException as e:
-        msg = f"Erro ao consultar EAN: {str(e)}"
-        logger.error(msg)
-        return msg
-
-    # [Cleanup] Removido bloco duplicado de ean_lookup antigo fora de função
+        return "Erro: A consulta à base de conhecimento demorou muito."
+    except Exception as e:
+        logger.error(f"Erro RAG: {e}")
+        return "Não consegui consultar a base de conhecimento no momento."
