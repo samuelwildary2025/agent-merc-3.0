@@ -1,6 +1,6 @@
 """
 Agente de IA para Atendimento de Supermercado usando LangGraph
-Versão com suporte a VISÃO e Pedidos com Comprovante
+Versão com suporte a VISÃO, Pedidos com Comprovante e MEMÓRIA OTIMIZADA
 """
 
 from typing import Dict, Any, TypedDict, Sequence, List
@@ -23,6 +23,10 @@ from tools.http_tools import estoque, pedidos, alterar, ean_lookup, estoque_prec
 from tools.time_tool import get_current_time, search_message_history
 from memory.limited_postgres_memory import LimitedPostgresChatMessageHistory
 
+# Se você criou o instructions_loader.py do passo anterior, mantenha o import. 
+# Caso contrário, use o load_system_prompt original.
+# from tools.instructions_loader import get_detailed_instructions 
+
 logger = setup_logger(__name__)
 
 # ============================================
@@ -31,29 +35,12 @@ logger = setup_logger(__name__)
 
 @tool
 def estoque_tool(url: str) -> str:
-    """
-    Consultar estoque e preço atual dos produtos no sistema do supermercado.
-    Ex: 'https://.../api/produtos/consulta?nome=arroz'
-    """
+    """Consultar estoque e preço atual."""
     return estoque(url)
 
 @tool
 def pedidos_tool(json_body: str) -> str:
-    """
-    Enviar o pedido finalizado para o painel dos funcionários (dashboard).
-    
-    O corpo da requisição deve ser um JSON (string) com:
-    - cliente: nome do cliente
-    - telefone: numero
-    - itens: lista de produtos
-    - total: valor total
-    - forma_pagamento: "PIX", "DINHEIRO", etc.
-    - comprovante: (OPCIONAL) URL do comprovante se houver [MEDIA_URL]
-    
-    Exemplo: '{"cliente": "Ana", "itens": [...], "forma_pagamento": "PIX", "comprovante": "https://wildhub..."}'
-    
-    Use esta ferramenta SOMENTE quando o cliente confirmar o pedido.
-    """
+    """Enviar o pedido finalizado."""
     return pedidos(json_body)
 
 @tool
@@ -63,7 +50,7 @@ def alterar_tool(telefone: str, json_body: str) -> str:
 
 @tool
 def search_history_tool(telefone: str, keyword: str = None) -> str:
-    """Busca mensagens anteriores do cliente com horários."""
+    """Busca mensagens anteriores."""
     return search_message_history(telefone, keyword)
 
 @tool
@@ -73,17 +60,16 @@ def time_tool() -> str:
 
 @tool("ean")
 def ean_tool_alias(query: str) -> str:
-    """Buscar EAN/infos do produto na base de conhecimento."""
+    """Buscar EAN/infos do produto."""
     q = (query or "").strip()
     if q.startswith("{") and q.endswith("}"): q = ""
     return ean_lookup(q)
 
 @tool("estoque")
 def estoque_preco_alias(ean: str) -> str:
-    """Consulta preço e disponibilidade pelo EAN (apenas dígitos)."""
+    """Consulta preço e disponibilidade pelo EAN."""
     return estoque_preco(ean)
 
-# Ferramentas ativas
 ACTIVE_TOOLS = [
     ean_tool_alias,
     estoque_preco_alias,
@@ -98,8 +84,10 @@ ACTIVE_TOOLS = [
 # ============================================
 
 def load_system_prompt() -> str:
+    # Lógica para carregar o prompt (Supabase ou Arquivo Local)
+    # Mantenha sua lógica atual aqui, seja ela a nova com Supabase ou a antiga
     base_dir = Path(__file__).resolve().parent
-    prompt_path = str((base_dir / "prompts" / "agent_system.md"))
+    prompt_path = str((base_dir / "prompts" / "agent_system_short.md")) # Usa o short se tiver Supabase
     try:
         text = Path(prompt_path).read_text(encoding="utf-8")
         text = text.replace("{base_url}", settings.supermercado_base_url)
@@ -107,7 +95,7 @@ def load_system_prompt() -> str:
         return text
     except Exception as e:
         logger.error(f"Falha ao carregar prompt: {e}")
-        raise
+        return "Você é um assistente de supermercado."
 
 def _build_llm():
     model = getattr(settings, "llm_model", "gpt-4o-mini")
@@ -128,30 +116,34 @@ def get_agent_graph():
         _agent_graph = create_agent_with_history()
     return _agent_graph
 
+def get_session_history(session_id: str) -> LimitedPostgresChatMessageHistory:
+    return LimitedPostgresChatMessageHistory(
+        connection_string=settings.postgres_connection_string,
+        session_id=session_id,
+        table_name=settings.postgres_table_name,
+        max_messages=settings.postgres_message_limit
+    )
+
 # ============================================
-# Função Principal
+# Função Principal (Modificada)
 # ============================================
 
 def run_agent_langgraph(telefone: str, mensagem: str) -> Dict[str, Any]:
     """
-    Executa o agente. Suporta texto e imagem (via tag [MEDIA_URL: ...]).
+    Executa o agente e gerencia a memória automaticamente.
     """
     print(f"[AGENT] Telefone: {telefone} | Msg bruta: {mensagem[:50]}...")
     
-    # 1. Extrair URL de imagem se houver (Formato: [MEDIA_URL: https://...])
+    # 1. Tratamento de Imagem
     image_url = None
     clean_message = mensagem
-    
-    # Regex para encontrar a tag de mídia injetada pelo server.py
     media_match = re.search(r"\[MEDIA_URL:\s*(.*?)\]", mensagem)
     if media_match:
         image_url = media_match.group(1)
-        # Remove a tag da mensagem de texto para não confundir o histórico visual
-        # Mas mantemos o texto descritivo original
         clean_message = mensagem.replace(media_match.group(0), "").strip()
         if not clean_message:
             clean_message = "Analise esta imagem/comprovante enviada."
-        logger.info(f"📸 Mídia detectada para visão: {image_url}")
+        logger.info(f"📸 Mídia detectada: {image_url}")
 
     # 2. Salvar histórico (User)
     history_handler = None
@@ -164,15 +156,11 @@ def run_agent_langgraph(telefone: str, mensagem: str) -> Dict[str, Any]:
     try:
         agent = get_agent_graph()
         
-        # 3. Construir mensagem (Texto Simples ou Multimodal)
+        # 3. Construir mensagem
         if image_url:
-            # Formato multimodal para GPT-4o / GPT-4o-mini
             message_content = [
                 {"type": "text", "text": clean_message},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url}
-                }
+                {"type": "image_url", "image_url": {"url": image_url}}
             ]
             initial_message = HumanMessage(content=message_content)
         else:
@@ -181,10 +169,10 @@ def run_agent_langgraph(telefone: str, mensagem: str) -> Dict[str, Any]:
         initial_state = {"messages": [initial_message]}
         config = {"configurable": {"thread_id": telefone}}
         
+        # 4. Executa Agente
         logger.info("Executando agente...")
         result = agent.invoke(initial_state, config)
         
-        # 4. Extrair resposta
         output = "Desculpe, não entendi."
         if isinstance(result, dict) and "messages" in result:
             messages = result["messages"]
@@ -201,18 +189,23 @@ def run_agent_langgraph(telefone: str, mensagem: str) -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Erro DB AI: {e}")
 
+            # 6. MANUTENÇÃO INTELIGENTE DA MEMÓRIA (O PULO DO GATO 🐈)
+            # Verifica e comprime o histórico se necessário
+            try:
+                # Se tiver mais de 8 mensagens (6 recentes + 2 para resumir), aciona a compressão
+                count = history_handler.get_message_count()
+                if count > 8:
+                    logger.info(f"Verificando compressão de memória para {telefone} (msg count: {count})...")
+                    llm_compressor = _build_llm()
+                    # Mantém as últimas 6 mensagens vivas e resume o resto
+                    history_handler.manage_rolling_summary(llm_compressor, group_size=6)
+            except Exception as e:
+                logger.error(f"Erro na manutenção de memória: {e}")
+
         return {"output": output, "error": None}
         
     except Exception as e:
         logger.error(f"Falha agente: {e}", exc_info=True)
         return {"output": "Tive um problema técnico, tente novamente.", "error": str(e)}
-
-def get_session_history(session_id: str) -> LimitedPostgresChatMessageHistory:
-    return LimitedPostgresChatMessageHistory(
-        connection_string=settings.postgres_connection_string,
-        session_id=session_id,
-        table_name=settings.postgres_table_name,
-        max_messages=settings.postgres_message_limit
-    )
 
 run_agent = run_agent_langgraph
