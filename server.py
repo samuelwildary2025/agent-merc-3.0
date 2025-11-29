@@ -1,6 +1,6 @@
 """
 Servidor FastAPI para Agente de Supermercado
-Versão: 1.6.0 (Com Pausas Naturais e Buffer)
+Versão: 1.6.1 (Com Pausas Naturais, Buffer e Filtro de Logs Corrigido)
 """
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -13,7 +13,8 @@ import random
 import threading
 import re
 import io
-import logging  # <--- Import necessário para o filtro
+import logging
+import copy # Importante para a correção do log
 
 try:
     from pypdf import PdfReader
@@ -317,21 +318,27 @@ if __name__ == "__main__":
     import uvicorn
     
     # 1. Carrega configuração padrão de log do Uvicorn
-    log_config = uvicorn.config.LOGGING_CONFIG
+    # Usamos deepcopy para não alterar a referência global e evitar efeitos colaterais
+    log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
     
-    # 2. Registra nosso filtro customizado
+    # 2. Garante que a seção 'filters' existe (Correção do Erro)
+    if "filters" not in log_config:
+        log_config["filters"] = {}
+    
+    # 3. Registra nosso filtro customizado
     # 'server.HealthCheckFilter' funciona porque o módulo principal ao rodar 'python server.py'
     # é mapeado como 'server' quando passamos "server:app" para o uvicorn.
     log_config["filters"]["health_filter"] = {
         "()": "server.HealthCheckFilter"
     }
     
-    # 3. Aplica o filtro ao handler de 'access' (que mostra os GET/POST)
+    # 4. Aplica o filtro ao handler de 'access' (que mostra os GET/POST)
     if "filters" not in log_config["handlers"]["access"]:
         log_config["handlers"]["access"]["filters"] = []
+    
     log_config["handlers"]["access"]["filters"].append("health_filter")
     
-    # 4. Inicia o servidor com a nova configuração
+    # 5. Inicia o servidor com a nova configuração
     uvicorn.run(
         "server:app", 
         host=settings.server_host, 
