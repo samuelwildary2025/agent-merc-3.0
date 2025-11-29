@@ -13,6 +13,7 @@ import random
 import threading
 import re
 import io
+import logging  # <--- Import necessário para o filtro
 
 try:
     from pypdf import PdfReader
@@ -31,6 +32,15 @@ from tools.redis_tools import (
 )
 
 logger = setup_logger(__name__)
+
+# --- Filtro de Logs Customizado ---
+class HealthCheckFilter(logging.Filter):
+    """
+    Filtra logs de health check para limpar o console.
+    Retorna False se a mensagem contiver "GET /health", bloqueando o log.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage().find("GET /health") == -1
 
 app = FastAPI(title="Agente de Supermercado", version="1.6.0")
 
@@ -305,4 +315,27 @@ async def webhook(req: Request, tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host=settings.server_host, port=settings.server_port, log_level=settings.log_level.lower())
+    
+    # 1. Carrega configuração padrão de log do Uvicorn
+    log_config = uvicorn.config.LOGGING_CONFIG
+    
+    # 2. Registra nosso filtro customizado
+    # 'server.HealthCheckFilter' funciona porque o módulo principal ao rodar 'python server.py'
+    # é mapeado como 'server' quando passamos "server:app" para o uvicorn.
+    log_config["filters"]["health_filter"] = {
+        "()": "server.HealthCheckFilter"
+    }
+    
+    # 3. Aplica o filtro ao handler de 'access' (que mostra os GET/POST)
+    if "filters" not in log_config["handlers"]["access"]:
+        log_config["handlers"]["access"]["filters"] = []
+    log_config["handlers"]["access"]["filters"].append("health_filter")
+    
+    # 4. Inicia o servidor com a nova configuração
+    uvicorn.run(
+        "server:app", 
+        host=settings.server_host, 
+        port=settings.server_port, 
+        log_level=settings.log_level.lower(),
+        log_config=log_config
+    )
